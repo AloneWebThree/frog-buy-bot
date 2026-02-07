@@ -3,6 +3,9 @@
 // - Spent (token in) using Swap event amounts
 // - Buyer address via transaction "from" (receipt/tx parsing)
 // - Keeps: tier badge + log-style power bar + HTML formatting + explorer links
+// Tweaks in this version:
+// - Display WSEI as "SEI" in messages (alias only; math unchanged)
+// - If buyer can't be resolved, show Recipient (Swap `to`) instead of claiming Buyer
 
 import "dotenv/config";
 import {
@@ -89,6 +92,12 @@ function escapeHtml(s: string) {
     .replaceAll('"', "&quot;");
 }
 
+function displaySymbol(sym: string) {
+  const s = sym.trim();
+  if (s.toUpperCase() === "WSEI") return "SEI";
+  return s;
+}
+
 async function sendTelegram(html: string) {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
   const r = await fetch(url, {
@@ -141,7 +150,7 @@ function tierBadge(amountFrog: number) {
   if (!Number.isFinite(amountFrog) || amountFrog <= 0) return "💧 Splash";
   if (amountFrog >= 50_000) return "👑 Frog King";
   if (amountFrog >= 10_000) return "🐊 Swamp Boss";
-  if (amountFrog >= 1_000) return "🐸 Big Frog";
+  if (amountFrog >= 2_000) return "🐸 Big Frog";
   if (amountFrog >= 100) return "🐣 Tadpole";
   return "💧 Splash";
 }
@@ -186,6 +195,7 @@ async function main() {
   const frogMeta = await readTokenMeta(FROG_ADDRESS);
   const otherToken = frogIs0 ? token1 : token0;
   const otherMeta = await readTokenMeta(otherToken);
+  const otherDisplay = displaySymbol(otherMeta.symbol);
 
   let lastProcessed = await client.getBlockNumber();
 
@@ -210,7 +220,7 @@ async function main() {
         shortAddr(PAIR_ADDRESS)
       )}</a>\n` +
       `Token: <b>${escapeHtml(frogMeta.symbol)}</b>\n` +
-      `Tracking spent: <b>${escapeHtml(otherMeta.symbol)}</b>`
+      `Tracking spent: <b>${escapeHtml(otherDisplay)}</b>`
   );
 
   while (true) {
@@ -242,7 +252,9 @@ async function main() {
           const frogHuman = formatUnits(frogOut, frogMeta.decimals);
           const frogPretty = prettyAmount(frogHuman, 4);
 
-          const spentHuman = spentRaw ? formatUnits(spentRaw, otherMeta.decimals) : "0";
+          const spentHuman = spentRaw
+            ? formatUnits(spentRaw, otherMeta.decimals)
+            : "0";
           const spentPretty = prettyAmount(spentHuman, 4);
 
           const frogNum = Number(frogHuman);
@@ -254,8 +266,7 @@ async function main() {
           const tx = log.transactionHash;
           const txShort = `${tx.slice(0, 10)}…${tx.slice(-8)}`;
 
-          // Buyer address: pull the transaction and use "from" (EOA)
-          // (Swap event's "sender" is usually a router; "to" is recipient. "from" is the real initiator.)
+          // Buyer address: use transaction "from" (initiator)
           let buyer: Address | null = null;
           try {
             const t = await client.getTransaction({ hash: tx });
@@ -265,17 +276,27 @@ async function main() {
           }
 
           const buyerLink = buyer
-            ? `<a href="${EXPLORER}/address/${buyer}">${escapeHtml(shortAddr(buyer))}</a>`
-            : `<a href="${EXPLORER}/address/${to}">${escapeHtml(shortAddr(String(to)))}</a>`;
+            ? `<a href="${EXPLORER}/address/${buyer}">${escapeHtml(
+                shortAddr(buyer)
+              )}</a>`
+            : null;
+
+          const recipientLink = `<a href="${EXPLORER}/address/${to as Address}">${escapeHtml(
+            shortAddr(String(to))
+          )}</a>`;
 
           const msg =
-            `🐸 <b>${escapeHtml(frogMeta.symbol)} BUY</b>\n` +
-            `Bought: <b>${escapeHtml(frogPretty)}</b> ${escapeHtml(frogMeta.symbol)}\n` +
-            `Spent: <b>${escapeHtml(spentPretty)}</b> ${escapeHtml(otherMeta.symbol)}\n` +
+            `Brand NEW <b>${escapeHtml(frogMeta.symbol)} BUY</b>\n` +
+            `Bought: <b>${escapeHtml(frogPretty)}</b> ${escapeHtml(
+              frogMeta.symbol
+            )}\n` +
+            `Spent: <b>${escapeHtml(spentPretty)}</b> ${escapeHtml(
+              otherDisplay
+            )}\n` +
             `<b>${escapeHtml(badge)}</b>  ${escapeHtml(bar)} <i>(${escapeHtml(
               compact(amountFrog)
             )})</i>\n` +
-            `Buyer: ${buyerLink}\n` +
+            `${buyerLink ? `Buyer: ${buyerLink}\n` : `Recipient: ${recipientLink}\n`}` +
             `Tx: <a href="${EXPLORER}/tx/${tx}">${escapeHtml(txShort)}</a>`;
 
           await sendTelegram(msg);
