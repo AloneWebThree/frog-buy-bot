@@ -31,7 +31,7 @@ const CONFIRMATIONS = 2;
 const EXPLORER = "https://seiscan.io";
 
 // Emoji meter settings
-const FROG_PER_EMOJI = 100; // 1 🐸 per 100 FROG
+const FROG_PER_EMOJI = 1000; // 1 🐸 per 1000 FROG
 const EMOJI_MAX = 100; // max 🐸 to avoid spam
 
 // ---- ABIs ----
