@@ -1,10 +1,9 @@
 // buybot.ts
 // Adds:
 // - Spent (token in) using Swap event amounts
-// - Buyer address via transaction "from" (receipt/tx parsing)
-// - Keeps: tier badge + log-style power bar + HTML formatting + explorer links
-// Tweaks in this version:
-// - Display WSEI as "SEI" in messages (alias only; math unchanged)
+// - Buyer address via transaction "from" (tx parsing)
+// - Emoji meter: 🐸 per 100 FROG bought (max 100)
+// - Displays WSEI as "SEI" in messages (alias only; math unchanged)
 // - If buyer can't be resolved, show Recipient (Swap `to`) instead of claiming Buyer
 
 import "dotenv/config";
@@ -31,11 +30,9 @@ const CONFIRMATIONS = 2;
 // Explorer base (Sei EVM)
 const EXPLORER = "https://seiscan.io";
 
-// Log bar settings (10 blocks, doubling thresholds)
-const LOG_BAR_BLOCKS = 10;
-const LOG_BAR_BASE = 100; // 100, 200, 400, 800, ... (doubles)
-const BAR_FILLED = "🟩";
-const BAR_EMPTY = "⬜";
+// Emoji meter settings
+const FROG_PER_EMOJI = 100; // 1 🐸 per 100 FROG
+const EMOJI_MAX = 100; // max 🐸 to avoid spam
 
 // ---- ABIs ----
 const pairAbi = [
@@ -123,36 +120,20 @@ function prettyAmount(amountStr: string, maxFrac = 4) {
   return n.toLocaleString(undefined, { maximumFractionDigits: maxFrac });
 }
 
-function compact(n: number) {
-  if (!Number.isFinite(n)) return "";
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (abs >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
-  return `${Math.floor(n)}`;
-}
-
-function buildLogBar(amountFrog: number) {
-  if (!Number.isFinite(amountFrog) || amountFrog <= 0) {
-    return BAR_EMPTY.repeat(LOG_BAR_BLOCKS);
-  }
-
-  let filled = 0;
-  for (let i = 0; i < LOG_BAR_BLOCKS; i++) {
-    const threshold = LOG_BAR_BASE * Math.pow(2, i);
-    if (amountFrog >= threshold) filled++;
-    else break;
-  }
-  return `${BAR_FILLED.repeat(filled)}${BAR_EMPTY.repeat(LOG_BAR_BLOCKS - filled)}`;
-}
-
 function tierBadge(amountFrog: number) {
   if (!Number.isFinite(amountFrog) || amountFrog <= 0) return "💧 Splash";
   if (amountFrog >= 50_000) return "👑 Frog King";
   if (amountFrog >= 10_000) return "🐊 Swamp Boss";
-  if (amountFrog >= 2_000) return "🐸 Big Frog";
+  if (amountFrog >= 1_000) return "🐸 Big Frog";
   if (amountFrog >= 100) return "🐣 Tadpole";
   return "💧 Splash";
+}
+
+function frogMeter(amountFrog: number) {
+  if (!Number.isFinite(amountFrog) || amountFrog <= 0) return "";
+  const count = Math.min(EMOJI_MAX, Math.floor(amountFrog / FROG_PER_EMOJI));
+  if (count <= 0) return "";
+  return "🐸".repeat(count);
 }
 
 async function readTokenMeta(address: Address) {
@@ -220,7 +201,8 @@ async function main() {
         shortAddr(PAIR_ADDRESS)
       )}</a>\n` +
       `Token: <b>${escapeHtml(frogMeta.symbol)}</b>\n` +
-      `Tracking spent: <b>${escapeHtml(otherDisplay)}</b>`
+      `Tracking spent: <b>${escapeHtml(otherDisplay)}</b>\n` +
+      `Meter: 🐸 per ${FROG_PER_EMOJI} (max ${EMOJI_MAX})`
   );
 
   while (true) {
@@ -246,7 +228,6 @@ async function main() {
           if (!frogOut || frogOut <= 0n) continue;
 
           // Spent = other token "in" to the pool
-          // If FROG is token1, then other is token0, spent = amount0In. Vice versa.
           const spentRaw = frogIs0 ? amount1In : amount0In;
 
           const frogHuman = formatUnits(frogOut, frogMeta.decimals);
@@ -261,7 +242,7 @@ async function main() {
           const amountFrog = Number.isFinite(frogNum) ? frogNum : 0;
 
           const badge = tierBadge(amountFrog);
-          const bar = buildLogBar(amountFrog);
+          const meter = frogMeter(amountFrog);
 
           const tx = log.transactionHash;
           const txShort = `${tx.slice(0, 10)}…${tx.slice(-8)}`;
@@ -286,16 +267,15 @@ async function main() {
           )}</a>`;
 
           const msg =
-            `💧 Update: <b>${escapeHtml(frogMeta.symbol)} Buy just took place 💧</b>\n` +
+            `Brand NEW <b>${escapeHtml(frogMeta.symbol)} BUY</b>\n` +
             `Bought: <b>${escapeHtml(frogPretty)}</b> ${escapeHtml(
               frogMeta.symbol
             )}\n` +
+            (meter ? `${meter}\n` : "") +
+            `<b>${escapeHtml(badge)}</b>\n` +
             `Spent: <b>${escapeHtml(spentPretty)}</b> ${escapeHtml(
               otherDisplay
             )}\n` +
-            `<b>${escapeHtml(badge)}</b>  ${escapeHtml(bar)} <i>(${escapeHtml(
-              compact(amountFrog)
-            )})</i>\n` +
             `${buyerLink ? `Buyer: ${buyerLink}\n` : `Recipient: ${recipientLink}\n`}` +
             `Tx: <a href="${EXPLORER}/tx/${tx}">${escapeHtml(txShort)}</a>`;
 
