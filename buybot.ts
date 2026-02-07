@@ -1,6 +1,8 @@
-// buybot.ts  (Option 1: log-style power bar + tier badge)
-// - Log bar doesn't instantly max: each block doubles (100, 200, 400, ...)
-// - Tight, hype-friendly message formatting + clickable links
+// buybot.ts
+// Adds:
+// - Spent (token in) using Swap event amounts
+// - Buyer address via transaction "from" (receipt/tx parsing)
+// - Keeps: tier badge + log-style power bar + HTML formatting + explorer links
 
 import "dotenv/config";
 import {
@@ -28,7 +30,7 @@ const EXPLORER = "https://seiscan.io";
 
 // Log bar settings (10 blocks, doubling thresholds)
 const LOG_BAR_BLOCKS = 10;
-const LOG_BAR_BASE = 100; // first block at 100 FROG, then doubles
+const LOG_BAR_BASE = 100; // 100, 200, 400, 800, ... (doubles)
 const BAR_FILLED = "🟩";
 const BAR_EMPTY = "⬜";
 
@@ -121,12 +123,6 @@ function compact(n: number) {
   return `${Math.floor(n)}`;
 }
 
-/**
- * Log-style bar: thresholds double each block.
- * Block i is "earned" if amount >= base * 2^i.
- * Example with base=100:
- * 100, 200, 400, 800, 1.6k, 3.2k, 6.4k, 12.8k, 25.6k, 51.2k
- */
 function buildLogBar(amountFrog: number) {
   if (!Number.isFinite(amountFrog) || amountFrog <= 0) {
     return BAR_EMPTY.repeat(LOG_BAR_BLOCKS);
@@ -138,16 +134,9 @@ function buildLogBar(amountFrog: number) {
     if (amountFrog >= threshold) filled++;
     else break;
   }
-
   return `${BAR_FILLED.repeat(filled)}${BAR_EMPTY.repeat(LOG_BAR_BLOCKS - filled)}`;
 }
 
-function maxLogThreshold() {
-  // last block threshold (base * 2^(blocks-1))
-  return LOG_BAR_BASE * Math.pow(2, LOG_BAR_BLOCKS - 1);
-}
-
-// Tier badge aligned with the log thresholds (feel free to rename)
 function tierBadge(amountFrog: number) {
   if (!Number.isFinite(amountFrog) || amountFrog <= 0) return "💧 Splash";
   if (amountFrog >= 50_000) return "👑 Frog King";
@@ -155,6 +144,20 @@ function tierBadge(amountFrog: number) {
   if (amountFrog >= 1_000) return "🐸 Big Frog";
   if (amountFrog >= 100) return "🐣 Tadpole";
   return "💧 Splash";
+}
+
+async function readTokenMeta(address: Address) {
+  const [decimals, symbol] = await Promise.all([
+    client
+      .readContract({ address, abi: erc20Abi, functionName: "decimals" })
+      .then((x) => Number(x as number))
+      .catch(() => 18),
+    client
+      .readContract({ address, abi: erc20Abi, functionName: "symbol" })
+      .then((x) => String(x))
+      .catch(() => "TOKEN"),
+  ]);
+  return { decimals, symbol };
 }
 
 // ---- main ----
@@ -180,28 +183,25 @@ async function main() {
     );
   }
 
-  const frogDecimals = Number(
-    (await client.readContract({
-      address: FROG_ADDRESS,
-      abi: erc20Abi,
-      functionName: "decimals",
-    })) as number
-  );
-
-  const frogSymbol = (await client
-    .readContract({
-      address: FROG_ADDRESS,
-      abi: erc20Abi,
-      functionName: "symbol",
-    })
-    .catch(() => "FROG")) as string;
+  const frogMeta = await readTokenMeta(FROG_ADDRESS);
+  const otherToken = frogIs0 ? token1 : token0;
+  const otherMeta = await readTokenMeta(otherToken);
 
   let lastProcessed = await client.getBlockNumber();
 
   console.log("RPC:", RPC_URL);
   console.log("Pair:", PAIR_ADDRESS);
   console.log("token0:", token0, "token1:", token1);
-  console.log("FROG:", FROG_ADDRESS, `(${frogSymbol}, decimals=${frogDecimals})`);
+  console.log(
+    "FROG:",
+    FROG_ADDRESS,
+    `(${frogMeta.symbol}, decimals=${frogMeta.decimals})`
+  );
+  console.log(
+    "Other:",
+    otherToken,
+    `(${otherMeta.symbol}, decimals=${otherMeta.decimals})`
+  );
   console.log("Starting from block:", lastProcessed);
 
   await sendTelegram(
@@ -209,10 +209,8 @@ async function main() {
       `Pair: <a href="${EXPLORER}/address/${PAIR_ADDRESS}">${escapeHtml(
         shortAddr(PAIR_ADDRESS)
       )}</a>\n` +
-      `Token: <b>${escapeHtml(frogSymbol)}</b>\n` +
-      `Scale: ${escapeHtml(compact(LOG_BAR_BASE))} → ${escapeHtml(
-        compact(maxLogThreshold())
-      )} (log bar)`
+      `Token: <b>${escapeHtml(frogMeta.symbol)}</b>\n` +
+      `Tracking spent: <b>${escapeHtml(otherMeta.symbol)}</b>`
   );
 
   while (true) {
@@ -231,45 +229,56 @@ async function main() {
         });
 
         for (const log of logs) {
-          const { amount0Out, amount1Out } = log.args;
+          const { amount0In, amount1In, amount0Out, amount1Out, to } = log.args;
 
           // BUY = FROG goes OUT of the pool
           const frogOut = frogIs0 ? amount0Out : amount1Out;
+          if (!frogOut || frogOut <= 0n) continue;
 
-          if (frogOut && frogOut > 0n) {
-            const frogHuman = formatUnits(frogOut, frogDecimals);
-            const frogPretty = prettyAmount(frogHuman, 4);
+          // Spent = other token "in" to the pool
+          // If FROG is token1, then other is token0, spent = amount0In. Vice versa.
+          const spentRaw = frogIs0 ? amount1In : amount0In;
 
-            const frogNum = Number(frogHuman);
-            const amountFrog = Number.isFinite(frogNum) ? frogNum : 0;
+          const frogHuman = formatUnits(frogOut, frogMeta.decimals);
+          const frogPretty = prettyAmount(frogHuman, 4);
 
-            const badge = tierBadge(amountFrog);
-            const bar = buildLogBar(amountFrog);
+          const spentHuman = spentRaw ? formatUnits(spentRaw, otherMeta.decimals) : "0";
+          const spentPretty = prettyAmount(spentHuman, 4);
 
-            const tx = log.transactionHash;
-            const txShort = `${tx.slice(0, 10)}…${tx.slice(-8)}`;
-            const pairShort = `${PAIR_ADDRESS.slice(0, 10)}…${PAIR_ADDRESS.slice(
-              -4
-            )}`;
+          const frogNum = Number(frogHuman);
+          const amountFrog = Number.isFinite(frogNum) ? frogNum : 0;
 
-            // Tighter message: badge + bar on one line
-            const msg =
-              `New <b>${escapeHtml(frogSymbol)} BUY</b>\n` +
-              `Amount: <b>${escapeHtml(frogPretty)}</b> ${escapeHtml(
-                frogSymbol
-              )}\n` +
-              `<b>${escapeHtml(badge)}</b>  ${escapeHtml(bar)} <i>(${escapeHtml(
-                compact(amountFrog)
-              )})</i>\n` +
-              `Tx: <a href="${EXPLORER}/tx/${tx}">${escapeHtml(
-                txShort
-              )}</a>\n` +
-              `Pair: <a href="${EXPLORER}/address/${PAIR_ADDRESS}">${escapeHtml(
-                pairShort
-              )}</a>`;
+          const badge = tierBadge(amountFrog);
+          const bar = buildLogBar(amountFrog);
 
-            await sendTelegram(msg);
+          const tx = log.transactionHash;
+          const txShort = `${tx.slice(0, 10)}…${tx.slice(-8)}`;
+
+          // Buyer address: pull the transaction and use "from" (EOA)
+          // (Swap event's "sender" is usually a router; "to" is recipient. "from" is the real initiator.)
+          let buyer: Address | null = null;
+          try {
+            const t = await client.getTransaction({ hash: tx });
+            buyer = t.from as Address;
+          } catch {
+            buyer = null;
           }
+
+          const buyerLink = buyer
+            ? `<a href="${EXPLORER}/address/${buyer}">${escapeHtml(shortAddr(buyer))}</a>`
+            : `<a href="${EXPLORER}/address/${to}">${escapeHtml(shortAddr(String(to)))}</a>`;
+
+          const msg =
+            `🐸 <b>${escapeHtml(frogMeta.symbol)} BUY</b>\n` +
+            `Bought: <b>${escapeHtml(frogPretty)}</b> ${escapeHtml(frogMeta.symbol)}\n` +
+            `Spent: <b>${escapeHtml(spentPretty)}</b> ${escapeHtml(otherMeta.symbol)}\n` +
+            `<b>${escapeHtml(badge)}</b>  ${escapeHtml(bar)} <i>(${escapeHtml(
+              compact(amountFrog)
+            )})</i>\n` +
+            `Buyer: ${buyerLink}\n` +
+            `Tx: <a href="${EXPLORER}/tx/${tx}">${escapeHtml(txShort)}</a>`;
+
+          await sendTelegram(msg);
         }
 
         lastProcessed = toBlock;
