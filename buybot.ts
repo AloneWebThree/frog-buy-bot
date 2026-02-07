@@ -124,7 +124,7 @@ function tierBadge(amountFrog: number) {
   if (!Number.isFinite(amountFrog) || amountFrog <= 0) return "💧 Splash";
   if (amountFrog >= 50_000) return "👑 Frog King";
   if (amountFrog >= 10_000) return "🐊 Swamp Boss";
-  if (amountFrog >= 1_000) return "🐸 Big Frog";
+  if (amountFrog >= 2_000) return "🦎 Small Guy";
   if (amountFrog >= 100) return "🐣 Tadpole";
   return "💧 Splash";
 }
