@@ -267,7 +267,7 @@ async function main() {
           )}</a>`;
 
           const msg =
-            `Brand NEW <b>${escapeHtml(frogMeta.symbol)} BUY</b>\n` +
+            `Alert! <b>${escapeHtml(frogMeta.symbol)} BUY 💧</b>\n` +
             `Bought: <b>${escapeHtml(frogPretty)}</b> ${escapeHtml(
               frogMeta.symbol
             )}\n` +
