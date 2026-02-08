@@ -2,9 +2,10 @@
 // Adds:
 // - Spent (token in) using Swap event amounts
 // - Buyer address via transaction "from" (tx parsing)
-// - Emoji meter: 🐸 per 100 FROG bought (max 100)
+// - Emoji meter: 🐸 per 1000 FROG bought (max 100)
 // - Displays WSEI as "SEI" in messages (alias only; math unchanged)
 // - If buyer can't be resolved, show Recipient (Swap `to`) instead of claiming Buyer
+// - USD value + implied FROG price + market cap (approx, based on this pool price)
 
 import "dotenv/config";
 import {
@@ -23,6 +24,11 @@ const FROG_ADDRESS = getAddress(process.env.FROG_ADDRESS!);
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID!;
 
+// Optional overrides:
+// If CoinGecko can’t infer the "other token" id, set OTHER_CG_ID.
+// Examples: "sei-network", "usd-coin"
+const OTHER_CG_ID = process.env.OTHER_CG_ID || "";
+
 // ---- settings ----
 const POLL_MS = 6000;
 const CONFIRMATIONS = 2;
@@ -33,6 +39,9 @@ const EXPLORER = "https://seiscan.io";
 // Emoji meter settings
 const FROG_PER_EMOJI = 1000; // 1 🐸 per 1000 FROG
 const EMOJI_MAX = 100; // max 🐸 to avoid spam
+
+// USD cache settings
+const PRICE_CACHE_MS = 60_000; // 60s cache (avoid CG rate issues)
 
 // ---- ABIs ----
 const pairAbi = [
@@ -66,6 +75,13 @@ const erc20Abi = [
     stateMutability: "view",
     inputs: [],
     outputs: [{ type: "string" }],
+  },
+  {
+    type: "function",
+    name: "totalSupply",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
   },
 ] as const;
 
@@ -120,6 +136,17 @@ function prettyAmount(amountStr: string, maxFrac = 4) {
   return n.toLocaleString(undefined, { maximumFractionDigits: maxFrac });
 }
 
+function prettyUSD(n: number) {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  // For tiny buys, show more precision
+  const maxFrac = n >= 1 ? 2 : n >= 0.1 ? 3 : 4;
+  return n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: maxFrac,
+  });
+}
+
 function tierBadge(amountFrog: number) {
   if (!Number.isFinite(amountFrog) || amountFrog <= 0) return "💧 Splash";
   if (amountFrog >= 50_000) return "👑 Frog King";
@@ -150,6 +177,54 @@ async function readTokenMeta(address: Address) {
   return { decimals, symbol };
 }
 
+async function readTotalSupply(address: Address): Promise<bigint> {
+  return client
+    .readContract({ address, abi: erc20Abi, functionName: "totalSupply" })
+    .then((x) => BigInt(x as any))
+    .catch(() => 0n);
+}
+
+// ---- CoinGecko USD price caching ----
+type PriceCache = { usd: number; ts: number };
+const cgCache = new Map<string, PriceCache>();
+
+function inferCoingeckoId(symbol: string) {
+  const s = symbol.trim().toUpperCase();
+  if (s === "WSEI" || s === "SEI") return "sei-network";
+  if (s === "USDC") return "usd-coin";
+  if (s === "USDT") return "tether";
+  if (s === "WETH" || s === "ETH") return "ethereum";
+  return "";
+}
+
+async function getUsdPriceCoingecko(coingeckoId: string): Promise<number> {
+  if (!coingeckoId) return 0;
+
+  const cached = cgCache.get(coingeckoId);
+  const now = Date.now();
+  if (cached && now - cached.ts < PRICE_CACHE_MS) return cached.usd;
+
+  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(
+    coingeckoId
+  )}&vs_currencies=usd`;
+
+  try {
+    const r = await fetch(url, {
+      headers: { "accept": "application/json" },
+    });
+    if (!r.ok) return cached?.usd ?? 0;
+
+    const data = await r.json();
+    const usd = Number(data?.[coingeckoId]?.usd ?? 0);
+    const clean = Number.isFinite(usd) ? usd : 0;
+
+    cgCache.set(coingeckoId, { usd: clean, ts: now });
+    return clean;
+  } catch {
+    return cached?.usd ?? 0;
+  }
+}
+
 // ---- main ----
 async function main() {
   const token0 = (await client.readContract({
@@ -178,6 +253,9 @@ async function main() {
   const otherMeta = await readTokenMeta(otherToken);
   const otherDisplay = displaySymbol(otherMeta.symbol);
 
+  // Infer CoinGecko ID for the "other token" (or use env override)
+  const otherCgId = OTHER_CG_ID || inferCoingeckoId(otherMeta.symbol);
+
   let lastProcessed = await client.getBlockNumber();
 
   console.log("RPC:", RPC_URL);
@@ -193,6 +271,7 @@ async function main() {
     otherToken,
     `(${otherMeta.symbol}, decimals=${otherMeta.decimals})`
   );
+  console.log("CoinGecko other id:", otherCgId || "(none)");
   console.log("Starting from block:", lastProcessed);
 
   await sendTelegram(
@@ -202,7 +281,8 @@ async function main() {
       )}</a>\n` +
       `Token: <b>${escapeHtml(frogMeta.symbol)}</b>\n` +
       `Tracking spent: <b>${escapeHtml(otherDisplay)}</b>\n` +
-      `Meter: 🐸 per ${FROG_PER_EMOJI} (max ${EMOJI_MAX})`
+      `Meter: 🐸 per ${FROG_PER_EMOJI} (max ${EMOJI_MAX})\n` +
+      `USD source: <b>CoinGecko</b> (${escapeHtml(otherCgId || "n/a")})`
   );
 
   while (true) {
@@ -266,6 +346,47 @@ async function main() {
             shortAddr(String(to))
           )}</a>`;
 
+          // ---- USD + price + mcap (approx) ----
+          // 1) other token USD
+          const otherUsd = await getUsdPriceCoingecko(otherCgId);
+
+          // 2) implied frog price from this swap
+          const spentNum = Number(spentHuman);
+          const spentOk = Number.isFinite(spentNum) ? spentNum : 0;
+
+          const buyUsd =
+            otherUsd > 0 && spentOk > 0 ? spentOk * otherUsd : 0;
+
+          const frogUsd =
+            buyUsd > 0 && amountFrog > 0 ? buyUsd / amountFrog : 0;
+
+          // 3) total supply & market cap
+          // Read totalSupply per buy (safe, but costs an RPC call).
+          // If you want to optimize later, cache it for e.g. 5 minutes.
+          const supplyRaw = await readTotalSupply(FROG_ADDRESS);
+          const supplyHuman = Number(formatUnits(supplyRaw, frogMeta.decimals));
+          const mcapUsd =
+            frogUsd > 0 && Number.isFinite(supplyHuman) && supplyHuman > 0
+              ? supplyHuman * frogUsd
+              : 0;
+
+          const usdLine =
+            buyUsd > 0
+              ? `Value: <b>${escapeHtml(prettyUSD(buyUsd))}</b>\n`
+              : "";
+
+          const priceLine =
+            frogUsd > 0
+              ? `Price: <b>${escapeHtml(prettyUSD(frogUsd))}</b> / ${escapeHtml(
+                  frogMeta.symbol
+                )}\n`
+              : "";
+
+          const mcapLine =
+            mcapUsd > 0
+              ? `MCap: <b>${escapeHtml(prettyUSD(mcapUsd))}</b>\n`
+              : "";
+
           const msg =
             `Alert! <b>${escapeHtml(frogMeta.symbol)} BUY 💧</b>\n` +
             `Bought: <b>${escapeHtml(frogPretty)}</b> ${escapeHtml(
@@ -276,7 +397,14 @@ async function main() {
             `Spent: <b>${escapeHtml(spentPretty)}</b> ${escapeHtml(
               otherDisplay
             )}\n` +
-            `${buyerLink ? `Buyer: ${buyerLink}\n` : `Recipient: ${recipientLink}\n`}` +
+            usdLine +
+            priceLine +
+            mcapLine +
+            `${
+              buyerLink
+                ? `Buyer: ${buyerLink}\n`
+                : `Recipient: ${recipientLink}\n`
+            }` +
             `Tx: <a href="${EXPLORER}/tx/${tx}">${escapeHtml(txShort)}</a>`;
 
           await sendTelegram(msg);
