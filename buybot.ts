@@ -375,20 +375,13 @@ async function main() {
               ? `Value: <b>${escapeHtml(prettyUSD(buyUsd))}</b>\n`
               : "";
 
-          const priceLine =
-            frogUsd > 0
-              ? `Price: <b>${escapeHtml(prettyUSD(frogUsd))}</b> / ${escapeHtml(
-                  frogMeta.symbol
-                )}\n`
-              : "";
-
           const mcapLine =
             mcapUsd > 0
               ? `MCap: <b>${escapeHtml(prettyUSD(mcapUsd))}</b>\n`
               : "";
 
           const msg =
-            `Alert! <b>${escapeHtml(frogMeta.symbol)} BUY 💧</b>\n` +
+            `<b>${escapeHtml(frogMeta.symbol)} BUY 💧</b>\n` +
             `Bought: <b>${escapeHtml(frogPretty)}</b> ${escapeHtml(
               frogMeta.symbol
             )}\n` +
@@ -398,7 +391,6 @@ async function main() {
               otherDisplay
             )}\n` +
             usdLine +
-            priceLine +
             mcapLine +
             `${
               buyerLink
